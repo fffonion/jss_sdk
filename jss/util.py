@@ -128,7 +128,7 @@ class Thread_Upload_Part(Thread):
 #                     break
         
         
-def generate_all_task_slices(file_name=None, part_size=None, max_part=10000):
+def generate_all_task_slices(file_name=None, part_size=None, max_part=10000, leak_parts = []):
     all_task_slices = Queue.Queue(0)
     file_size = os.path.getsize(file_name)
     if part_size <= 0:
@@ -151,12 +151,13 @@ def generate_all_task_slices(file_name=None, part_size=None, max_part=10000):
             part_num = 1
             while left_size > 0:
                 if left_size >= part_size:
-                    task_slice = {}
-                    task_slice['offset'] = current_offset
-                    task_slice['part_size'] = part_size
-                    task_slice['part_num'] = part_num
-                    task_slice['file_name'] = file_name
-                    all_task_slices.put(task_slice)
+                    if part_num in leak_parts:
+                        task_slice = {}
+                        task_slice['offset'] = current_offset
+                        task_slice['part_size'] = part_size
+                        task_slice['part_num'] = part_num
+                        task_slice['file_name'] = file_name
+                        all_task_slices.put(task_slice)
                     current_offset = current_offset + part_size
                     left_size = file_size - current_offset
                     part_num = part_num + 1

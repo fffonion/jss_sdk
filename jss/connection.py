@@ -32,7 +32,7 @@ class JssClient(object):
     '''
     
     def __init__(self, access_key=None, secret_key=None, host=None, port=None, strict=False, timeout=None, maxsize=None,
-                 block=False, headers=None, is_security=False):
+                 block=False, headers=None, is_security=False, proxy = None):
         self.access_key = access_key
         self.secret_key = secret_key
         self.map = mime_type.mime_map
@@ -40,6 +40,7 @@ class JssClient(object):
         self.port = port
         self.pool = None
         self.is_security = is_security
+        self.proxy = proxy
         if not timeout:
             self.timeout = timeout
         else:
@@ -64,9 +65,12 @@ class JssClient(object):
                 self.pool = httplib.HTTPSConnection(host=self.host, port=self.port)
         else:
             if sys.version_info >= (2, 6):
-                self.pool = httplib.HTTPConnection(host=self.host, port=self.port, timeout=self.timeout)
+                if self.proxy:
+                    self.pool = httplib.HTTPConnection(host=self.proxy[0], port=self.proxy[1], timeout=self.timeout)
+                else:
+                    self.pool = httplib.HTTPConnection(host=self.host, port=self.port, timeout=self.timeout)
             else:
-                self.pool = httplib.HTTPConnection(host=self.host, port=self.port)    
+                self.pool = httplib.HTTPConnection(host=self.host, port=self.port)
             
     def get_credentials(self, method, url_resource, headers=None):
         if  headers:
@@ -133,6 +137,9 @@ class JssClient(object):
         headers['Date'] = date
         headers['Authorization'] = self.get_credentials(method, path_au, headers)
         self.get_connection()
+        if self.proxy:
+            headers['Host'] = 'storage.jcloud.com'
+            self.pool.connect()
         retry = 6
         while retry > 0:
             retry = retry - 1

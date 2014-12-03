@@ -80,7 +80,7 @@ class Key(object):
         """
         bucket_name_check(self.bucket.name)
         object_name_check(self.name)
-        fq = open(local_file_path, 'r')
+        fq = open(local_file_path, 'rb')
         fq.seek(os.SEEK_SET, os.SEEK_END)
         filesize = fq.tell()
         fq.seek(os.SEEK_SET)
@@ -235,7 +235,7 @@ class Key(object):
         
        
     def generate_url(self, method, headers=None, param=None):
-        url = "http://%s:%s/%s/%s" % (self.bucket.jss_client.host, self.bucket.jss_client.port, self.bucket.name, self.name)
+        url = "http://%s%s/%s/%s" % (self.bucket.jss_client.host, (':%s' % self.bucket.jss_client.port) if self.bucket.jss_client.port else '', self.bucket.name, self.name)
         l = []
         if not param:
             param = {}
@@ -359,7 +359,7 @@ class Key(object):
     
     def upload_part_from_pos(self, headers=None, local_file_path=None, offset=None, part_size=None, part_number=None, upload_id=None):
         
-        fp = open(local_file_path, 'r')
+        fp = open(local_file_path, 'rb')
         param = {}
         param['partNumber'] = part_number 
         param['uploadId'] = upload_id
@@ -398,21 +398,25 @@ class Key(object):
             left_len = left_len - len(buff_content)
         fp.close()
         return self.bucket.jss_client.pool.getresponse()
-    
-    def multi_upload(self, headers=None, local_file_path=None, part_size=commonconstants.DEFAULT_PART_SIZE):
+        
+    def multi_upload_fake(self, headers=None, local_file_path=None, part_size=commonconstants.DEFAULT_PART_SIZE):
+        import sys
         bucket_name_check(self.bucket.name)
         object_name_check(self.name)
         pre_upload = self.init_multi_upload() 
-        fp = open(local_file_path, 'rb')
+        #fp = open(local_file_path, 'rb')
         m = md5.new()
-        file_size = os.path.getsize(local_file_path)
+        file_size = sys.maxint * sys.maxint
         num_part = file_size / part_size
         if file_size % part_size != 0:
             num_part = num_part + 1
-        for i in range(num_part):
+        i = 0
+        while True:
+            i += 1
             retry_times=0
-            data_content=fp.read(part_size)
+            data_content=os.urandom(part_size / 1024) * 1024
             m.update(data_content)
+            print('part%d (%dM)' % (i, i * part_size / 1024 / 1024))
             while retry_times<commonconstants.DEFAULT_RETRY_COUNT:
                 response = self.upload_part(headers, data_content, i + 1, pre_upload['UploadId'])
                 if response.status/100==2:
@@ -423,6 +427,60 @@ class Key(object):
             if retry_times>=commonconstants.DEFAULT_RETRY_COUNT:
                 raise Exception("-2, after retry %s, failed, multi upload part failed!" % retry_times)
         result = self.get_uploaded_parts(None, pre_upload['UploadId'])
+        part_submit_json = self._generate_part_json(result)
+        data=self.complete_multi_upload(None, pre_upload['UploadId'], json.dumps(part_submit_json))
+        #fp.close()
+        
+        return data,m.hexdigest()
+        
+    def multi_upload(self, headers=None, local_file_path=None, part_size=commonconstants.DEFAULT_PART_SIZE, callback=None, prt = None):
+        if not prt:
+            prt = lambda *args, **kwargs:None
+        bucket_name_check(self.bucket.name)
+        object_name_check(self.name)
+        pre_upload = self.init_multi_upload() 
+        fp = open(local_file_path, 'rb')
+        m = md5.new()
+        file_size = os.path.getsize(local_file_path)
+        num_part = file_size / part_size
+        if file_size % part_size != 0:
+            num_part = num_part + 1
+
+        check_part_trytime = commonconstants.DEFAULT_RETRY_COUNT
+        leak_parts = [i for i in range(1, num_part+1)]#init
+        while check_part_trytime > 0:
+            for i in range(num_part):
+                retry_times=0
+                if len(leak_parts) == num_part or (i+1) in leak_parts:#firsr time or check leak
+                    data_content=fp.read(part_size)
+                    if len(leak_parts) == num_part:#first time
+                        m.update(data_content)
+                else:
+                    fp.seek(part_size)
+                    continue
+                while retry_times<commonconstants.DEFAULT_RETRY_COUNT:
+                    response = self.upload_part(headers, data_content, i + 1, pre_upload['UploadId'])
+                    if response.status/100==2:
+                        break
+                    else:
+                        retry_times=retry_times+1   
+                        time.sleep(1)
+                if callback:
+                    callback(i,num_part,part_size)
+                if retry_times>=commonconstants.DEFAULT_RETRY_COUNT:
+                    raise Exception("-2, after retry %s, failed, multi upload part failed!" % retry_times)
+            result = self.get_uploaded_parts(None, pre_upload['UploadId'])
+            #check
+            #prt(result['Part'])
+            if len(result['Part']) == num_part:#no leak
+                break
+            all_part_finnished = [int(p['PartNumber']) for p in result['Part']]
+            leak_parts = [i for i in range(1, num_part+1) if i not in all_part_finnished]
+            prt('%d parts leaked:%s' % (len(leak_parts), ','.join(map(str, leak_parts))))
+            
+            check_part_trytime -= 1
+            time.sleep(3)
+
         part_submit_json = self._generate_part_json(result)
         data=self.complete_multi_upload(None, pre_upload['UploadId'], json.dumps(part_submit_json))
         fp.close()
@@ -485,21 +543,42 @@ class Key(object):
         return data,m.hexdigest()
        
     def multi_thread_upload(self, headers=None, local_file_path=None, part_size=commonconstants.DEFAULT_PART_SIZE,
-                             num_thread=10, max_part=10000,timeout=None):
+                             num_thread=10, max_part=10000,timeout=None,prt=None):
+        if not prt:
+            prt = lambda *args, **kwargs:None
         bucket_name_check(self.bucket.name)
         object_name_check(self.name)
         pre_upload = self.init_multi_upload()
-        task_queue = generate_all_task_slices(file_name=local_file_path, part_size=part_size, max_part=max_part)
-        thread_list = []
-        for i in range(num_thread):
-            jss_client = jss.connection.JssClient(access_key=self.bucket.jss_client.access_key, secret_key=self.bucket.jss_client.secret_key,
-                         host=self.bucket.jss_client.host, port=self.bucket.jss_client.port,timeout=timeout)
-            thread_curr = Thread_Upload_Part(jss_client=jss_client, bucket_name=self.bucket.name, object_name=self.name, upload_id=pre_upload['UploadId'], all_task_slices=task_queue)
-            thread_list.append(thread_curr)
-            thread_curr.start()
-        for item in thread_list:
-            item.join()
-        result = self.get_uploaded_parts(None, pre_upload['UploadId'])
+        check_part_trytime = commonconstants.DEFAULT_RETRY_COUNT
+        file_size = os.stat(local_file_path).st_size
+        num_part = file_size / part_size
+        if file_size % part_size != 0:
+            num_part = num_part + 1
+        leak_parts = [i for i in range(1, num_part+1)]#init
+        while check_part_trytime > 0:
+            task_queue = generate_all_task_slices(file_name=local_file_path, part_size=part_size, max_part=max_part, leak_parts = leak_parts)
+            thread_list = []
+            for i in range(num_thread):
+                jss_client = jss.connection.JssClient(access_key=self.bucket.jss_client.access_key, secret_key=self.bucket.jss_client.secret_key,
+                             host=self.bucket.jss_client.host, port=self.bucket.jss_client.port,timeout=timeout)
+                thread_curr = Thread_Upload_Part(jss_client=jss_client, bucket_name=self.bucket.name, object_name=self.name, upload_id=pre_upload['UploadId'], all_task_slices=task_queue)
+                thread_list.append(thread_curr)
+                thread_curr.start()
+            for item in thread_list:
+                item.join()
+            result = self.get_uploaded_parts(None, pre_upload['UploadId'])
+            #check
+            prt(result['Part'])
+            if len(result['Part']) == num_part:#no leak
+                break
+            all_part_finnished = [int(p['PartNumber']) for p in result['Part']]
+            leak_parts = [i for i in range(1, num_part+1) if i not in all_part_finnished]
+            if len(leak_parts) == 0:
+                break
+            prt('%d parts leaked:%s' % (len(leak_parts), ','.join(map(str, leak_parts))))
+            
+            check_part_trytime -= 1
+            time.sleep(3)
         part_submit_json = self._generate_part_json(result)
         data=self.complete_multi_upload(None, pre_upload['UploadId'], json.dumps(part_submit_json))
         return data
@@ -585,6 +664,7 @@ class Key(object):
         if response.status / 100 != 2:
             error_handler(response)
         return response
+        
     
                
         
