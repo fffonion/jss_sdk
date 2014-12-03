@@ -7,6 +7,7 @@ Created on 2013-7-23
 from jss import key
 from jss.exception import StorageError
 from jss.util import error_handler
+from jss.acl import acl
 import json
 import urllib
 
@@ -171,4 +172,7 @@ class Bucket(object):
         if response.status/100!=2:
             error_handler(response)
         return  response
+    
+    def acl(self):
+        return acl(self.name, self.jss_client)
     
