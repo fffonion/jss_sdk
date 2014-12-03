@@ -5,3 +5,4 @@ A more reliable Jingdong Storage Service SDK
 
 * Fix bugs.
 * Check part whether REALLY uploaded before complete the request.
+* Add ACL support (like JAVA API)
